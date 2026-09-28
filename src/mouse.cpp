@@ -85,16 +85,6 @@ void move_to_point(int x, int y) {
     flush_inputs(inputs);
 }
 
-void move_relative(int dx, int dy) {
-    std::vector<INPUT> inputs(1);
-    INPUT& input = inputs.front();
-    input.type = INPUT_MOUSE;
-    input.mi.dx = static_cast<LONG>(dx);
-    input.mi.dy = static_cast<LONG>(dy);
-    input.mi.dwFlags = MOUSEEVENTF_MOVE;
-    flush_inputs(inputs);
-}
-
 // 系统时钟粒度默认 ~15.5ms，会把 sleep 拉长成 16/31 这种台阶；
 // 移动期间临时提到 1ms，结束后立刻还回去。
 class TimerResolutionGuard {
@@ -188,6 +178,45 @@ void move_humanized(int x, int y, int duration_ms) {
     }
 }
 
+// 依次走完 stops 的每个点，调用方需保证按钮处于按下状态。
+// total_duration_ms < 0 时每段按距离自动定时长；>= 0 时视为整段总时长，
+// 按各段距离比例分配，余量补给最后一段，使总耗时与请求一致。
+void move_through_stops(const std::vector<POINT>& stops, int total_duration_ms) {
+    std::vector<double> lengths(stops.size(), 0.0);
+    double total = 0.0;
+    POINT previous{};
+    if (GetCursorPos(&previous)) {
+        for (std::size_t i = 0; i < stops.size(); ++i) {
+            lengths[i] = std::hypot(static_cast<double>(stops[i].x - previous.x),
+                                    static_cast<double>(stops[i].y - previous.y));
+            total += lengths[i];
+            previous = stops[i];
+        }
+    }
+
+    const int count = static_cast<int>(stops.size());
+    int remaining = total_duration_ms;
+    for (int i = 0; i < count; ++i) {
+        int segment = -1;
+        if (total_duration_ms >= 0) {
+            if (i + 1 == count) {
+                segment = remaining;
+            } else if (total > 0.0) {
+                // 截断而非四舍五入，保证各段之和不超过总时长
+                segment = static_cast<int>(total_duration_ms * (lengths[i] / total));
+            } else {
+                segment = total_duration_ms / count;
+            }
+            remaining -= segment;
+        }
+        move_humanized(stops[i].x, stops[i].y, segment);
+    }
+}
+
+// 双击的两次点击间隔：必须落在系统双击时间（默认 500ms）内，
+// 系统才会把第二次按下合成成 WM_*BUTTONDBLCLK，否则只当成两次单击。
+constexpr int kDoubleClickGapMs = 30;
+
 void press_button(const ButtonFlags& flags) {
     std::vector<INPUT> inputs(1);
     INPUT& input = inputs.front();
@@ -241,9 +270,9 @@ nlohmann::json mouse_handler(const nlohmann::json& args) {
     }
 
     const std::string button = util::to_lower(jargs::get_string(args, "button", "left"));
-    const int clicks = (std::max)(1, jargs::get_int(args, "clicks", 1));
-    int click_interval = jargs::get_int(args, "interval_ms", 30);
-    if (click_interval < 0) click_interval = 0;
+
+    // 所有会移动光标的动作都走拟人轨迹：<0 按距离自动定时长，0 瞬移，>0 固定耗时
+    const int duration = jargs::has(args, "duration_ms") ? jargs::get_int(args, "duration_ms", -1) : -1;
 
     if (action == "position") {
         return text_content("cursor is at " + cursor_position_text());
@@ -252,7 +281,6 @@ nlohmann::json mouse_handler(const nlohmann::json& args) {
     if (action == "move") {
         const int x = require_int(args, "x");
         const int y = require_int(args, "y");
-        const int duration = jargs::has(args, "duration_ms") ? jargs::get_int(args, "duration_ms", -1) : -1;
         move_humanized(x, y, duration);
         return text_content("moved cursor to (" + std::to_string(x) + "," + std::to_string(y) + ")");
     }
@@ -263,27 +291,34 @@ nlohmann::json mouse_handler(const nlohmann::json& args) {
         if (dx == 0 && dy == 0) {
             throw std::runtime_error("move_relative requires a non-zero 'dx' or 'dy'");
         }
-        move_relative(dx, dy);
+        POINT origin{};
+        if (!GetCursorPos(&origin)) {
+            throw std::runtime_error("GetCursorPos failed: " + util::last_error_string(GetLastError()));
+        }
+        move_humanized(origin.x + dx, origin.y + dy, duration);
         return text_content("moved cursor by (" + std::to_string(dx) + "," + std::to_string(dy) + ")");
     }
 
     if (action == "click" || action == "double_click") {
-        const int count = (action == "double_click") ? (std::max)(2, clicks) : clicks;
+        const bool doubled = (action == "double_click");
         if (jargs::has(args, "x") && jargs::has(args, "y")) {
-            move_to_point(jargs::get_int(args, "x", 0), jargs::get_int(args, "y", 0));
+            move_humanized(jargs::get_int(args, "x", 0), jargs::get_int(args, "y", 0), duration);
         }
         const ButtonFlags flags = button_flags(button);
-        for (int i = 0; i < count; ++i) {
+        press_button(flags);
+        release_button(flags);
+        if (doubled) {
+            sleep_ms(kDoubleClickGapMs);
             press_button(flags);
             release_button(flags);
-            if (i + 1 < count) sleep_ms(click_interval);
         }
-        return text_content(button + " click x" + std::to_string(count) + " at " + cursor_position_text());
+        return text_content(button + (doubled ? " double_click" : " click") + " at " +
+                            cursor_position_text());
     }
 
     if (action == "down" || action == "up") {
         if (jargs::has(args, "x") && jargs::has(args, "y")) {
-            move_to_point(jargs::get_int(args, "x", 0), jargs::get_int(args, "y", 0));
+            move_humanized(jargs::get_int(args, "x", 0), jargs::get_int(args, "y", 0), duration);
         }
         const ButtonFlags flags = button_flags(button);
         if (action == "down") {
@@ -296,8 +331,6 @@ nlohmann::json mouse_handler(const nlohmann::json& args) {
     }
 
     if (action == "drag") {
-        const int to_x = require_int(args, "to_x");
-        const int to_y = require_int(args, "to_y");
         int from_x = 0;
         int from_y = 0;
         const bool has_start = jargs::has(args, "x") && jargs::has(args, "y");
@@ -306,24 +339,48 @@ nlohmann::json mouse_handler(const nlohmann::json& args) {
             from_y = jargs::get_int(args, "y", 0);
         }
 
-        const int duration = jargs::has(args, "duration_ms") ? jargs::get_int(args, "duration_ms", -1) : -1;
+        // 依次经过的点：waypoints 数组在前，to_x/to_y 若给出则作为最后一点
+        std::vector<POINT> stops;
+        const nlohmann::json::const_iterator waypoints = args.find("waypoints");
+        if (waypoints != args.end() && !waypoints->is_null()) {
+            if (!waypoints->is_array()) {
+                throw std::runtime_error("argument 'waypoints' must be an array of {x,y} objects");
+            }
+            for (const nlohmann::json& item : *waypoints) {
+                if (!item.is_object()) {
+                    throw std::runtime_error("every 'waypoints' entry must be an {x,y} object");
+                }
+                stops.push_back({require_int(item, "x"), require_int(item, "y")});
+            }
+        }
+        if (jargs::has(args, "to_x") || jargs::has(args, "to_y")) {
+            stops.push_back({require_int(args, "to_x"), require_int(args, "to_y")});
+        }
+        if (stops.empty()) {
+            throw std::runtime_error("drag requires 'to_x'/'to_y' or a non-empty 'waypoints'");
+        }
 
         const ButtonFlags flags = button_flags(button);
-        if (has_start) move_to_point(from_x, from_y);
+        // 起点只是定位，不计入整段拖拽的总时长；请求瞬移时同样瞬移
+        if (has_start) move_humanized(from_x, from_y, duration == 0 ? 0 : -1);
         press_button(flags);
         try {
-            move_humanized(to_x, to_y, duration);
+            move_through_stops(stops, duration);
         } catch (...) {
             release_button(flags);
             throw;
         }
         release_button(flags);
-        return text_content(button + " drag to (" + std::to_string(to_x) + "," + std::to_string(to_y) + ")");
+
+        const POINT& last = stops.back();
+        std::string summary = button + " drag to (" + std::to_string(last.x) + "," + std::to_string(last.y) + ")";
+        if (stops.size() > 1) summary += " via " + std::to_string(stops.size() - 1) + " waypoint(s)";
+        return text_content(summary);
     }
 
     if (action == "scroll") {
         if (jargs::has(args, "x") && jargs::has(args, "y")) {
-            move_to_point(jargs::get_int(args, "x", 0), jargs::get_int(args, "y", 0));
+            move_humanized(jargs::get_int(args, "x", 0), jargs::get_int(args, "y", 0), duration);
         }
         const int dx = jargs::get_int(args, "dx", 0);
         const int dy = jargs::get_int(args, "dy", 0);
@@ -346,28 +403,41 @@ Tool make_mouse_tool() {
          {{"type", "string"},
           {"enum", {"move", "move_relative", "click", "double_click", "down", "up", "drag", "scroll", "position"}},
           {"description",
-           "move: absolute move to x,y. move_relative: move by dx,dy. click / double_click: press and release a "
-           "button, optionally after moving to x,y. down / up: hold or release a button. drag: hold a button and "
-           "move to to_x,to_y. scroll: turn the wheel by dx,dy notches (positive dy scrolls up). position: report "
+           "move: absolute move to x,y. move_relative: move by dx,dy. click: one press and release, optionally after "
+           "moving to x,y. double_click: two presses and releases in quick succession, so the system sees a real "
+           "double click. down / up: press or release a button and leave it in that state. drag: hold a button and "
+           "move to to_x,to_y, optionally passing through the 'waypoints' first. scroll: turn the wheel by dx,dy "
+           "notches (positive dy scrolls up). position: report "
            "the cursor position."}}},
         {"x", {{"type", "integer"}, {"description", "Absolute X in virtual-screen pixels."}}},
         {"y", {{"type", "integer"}, {"description", "Absolute Y in virtual-screen pixels."}}},
         {"dx", {{"type", "integer"}, {"description", "Relative X offset (move_relative) or wheel notches (scroll)."}}},
         {"dy", {{"type", "integer"}, {"description", "Relative Y offset (move_relative) or wheel notches (scroll)."}}},
-        {"to_x", {{"type", "integer"}, {"description", "Drag target X."}}},
-        {"to_y", {{"type", "integer"}, {"description", "Drag target Y."}}},
+        {"to_x", {{"type", "integer"}, {"description", "Drag target X. Optional when waypoints is given."}}},
+        {"to_y", {{"type", "integer"}, {"description", "Drag target Y. Optional when waypoints is given."}}},
+        {"waypoints",
+         {{"type", "array"},
+          {"description",
+           "drag only: a list of intermediate {x,y} points to pass through, in order, while the button stays down. "
+           "to_x,to_y is appended as the final stop when given."},
+          {"items",
+           {{"type", "object"},
+            {"properties",
+             {{"x", {{"type", "integer"}, {"description", "Absolute X in virtual-screen pixels."}}},
+              {"y", {{"type", "integer"}, {"description", "Absolute Y in virtual-screen pixels."}}}}},
+            {"required", {"x", "y"}}}}}},
         {"button",
          {{"type", "string"},
           {"enum", {"left", "right", "middle", "x1", "x2"}},
           {"description", "Mouse button, default left."}}},
-        {"clicks", {{"type", "integer"}, {"description", "Number of clicks for click / double_click. Default 1."}}},
         {"duration_ms",
          {{"type", "integer"},
           {"description",
-           "For move and drag: time spent moving, in milliseconds. Omit it to derive a human-like duration from the "
-           "distance (about 120 ms nearby, up to 650 ms across the screen); 0 jumps straight to the target. The "
-           "final position is exact either way."}}},
-        {"interval_ms", {{"type", "integer"}, {"description", "Delay between repeated clicks. Default 30."}}},
+           "Time spent moving the cursor, in milliseconds, for any action that repositions it (move, move_relative, "
+           "click, double_click, down, up, drag, scroll). Omit it to derive a human-like duration from the distance "
+           "(about 120 ms nearby, up to 650 ms across the screen); 0 jumps straight to the target. For a drag through "
+           "waypoints it is the total time for the whole path, split across segments by distance. The final position "
+           "is exact either way."}}},
     };
 
     Tool tool;
@@ -375,8 +445,9 @@ Tool make_mouse_tool() {
     tool.description =
         "Control the Windows mouse cursor. Coordinates are absolute virtual-screen pixels with the origin at "
         "the top-left, matching the image returned by 'screenshot'. Use 'position' to read the current cursor "
-        "location. Input is injected with SendInput, so it cannot reach windows that run at a higher integrity "
-        "level than this process.";
+        "location. Every action that repositions the cursor glides there along a human-like path by default; pass "
+        "duration_ms to control the time, or 0 to teleport. Input is injected with SendInput, so it cannot reach "
+        "windows that run at a higher integrity level than this process.";
     tool.input_schema = {{"type", "object"}, {"properties", properties}, {"required", {"action"}}};
     tool.handler = mouse_handler;
     return tool;
