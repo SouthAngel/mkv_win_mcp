@@ -46,6 +46,9 @@ cmake --build build --config Release
 - `region`：只抓一块，给 `x` `y` `width` `height`
 - `max_width` / `max_height`：默认都是 1568
 - `format`：`png`（默认，无损）或 `jpeg`（小）；`quality` 默认 80
+- `output`：`image`（默认，返回图片块）/ `base64`（返回 base64 文本）/ `file`（存盘并返回路径）；选 `file` 时用 `save_path` 指定位置
+
+`save_path` 原样交给系统，相对路径按服务进程的工作目录解析，父目录需要已存在；写出的格式跟随 `format`。
 
 限制尺寸是有原因的：4K 原图 base64 之后是好几 MB 的文本，很容易把上下文撑爆。
 

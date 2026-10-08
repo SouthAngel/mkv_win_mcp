@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -239,6 +240,16 @@ nlohmann::json screenshot_handler(const nlohmann::json& args) {
         throw std::runtime_error("quality must be within 1..100");
     }
 
+    // 先校验再抓屏，避免抓完一轮才因为参数写错失败
+    const std::string output_mode = util::to_lower(util::trim(jargs::get_string(args, "output", "image")));
+    if (output_mode != "image" && output_mode != "base64" && output_mode != "file") {
+        throw std::runtime_error("output must be 'image', 'base64' or 'file'");
+    }
+    const std::string save_path = jargs::get_string(args, "save_path", "");
+    if (output_mode == "file" && save_path.empty()) {
+        throw std::runtime_error("output 'file' requires a non-empty 'save_path'");
+    }
+
     ScreenBitmap shot;
     capture_screen(rect, shot);
 
@@ -290,11 +301,30 @@ nlohmann::json screenshot_handler(const nlohmann::json& args) {
             << "), returned " << output_width << "x" << output_height << " "
             << (use_jpeg ? "jpeg" : "png") << ", " << bytes.size() << " bytes";
 
+    if (output_mode == "file") {
+        const std::wstring wide_path = util::to_wide(save_path);
+        std::ofstream file(wide_path.c_str(), std::ios::binary | std::ios::trunc);
+        if (!file) {
+            throw std::runtime_error("cannot open '" + save_path + "' for writing");
+        }
+        file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        file.close();
+        if (!file) {
+            throw std::runtime_error("failed to write '" + save_path + "'");
+        }
+        summary << ", written to " << save_path;
+        return nlohmann::json::array({{{"type", "text"}, {"text", summary.str()}}});
+    }
+
+    const std::string encoded = util::base64_encode(bytes.data(), bytes.size());
+    if (output_mode == "base64") {
+        return nlohmann::json::array(
+            {{{"type", "text"}, {"text", summary.str()}}, {{"type", "text"}, {"text", encoded}}});
+    }
+
     return nlohmann::json::array(
         {{{"type", "text"}, {"text", summary.str()}},
-         {{"type", "image"},
-          {"data", util::base64_encode(bytes.data(), bytes.size())},
-          {"mimeType", use_jpeg ? "image/jpeg" : "image/png"}}});
+         {{"type", "image"}, {"data", encoded}, {"mimeType", use_jpeg ? "image/jpeg" : "image/png"}}});
 }
 
 }  // namespace
@@ -326,6 +356,18 @@ Tool make_screenshot_tool() {
           {"description", "Image format. png is lossless but larger, jpeg is smaller. Default png."}}},
         {"quality",
          {{"type", "integer"}, {"description", "JPEG quality within 1..100. Default 80, ignored for png."}}},
+        {"output",
+         {{"type", "string"},
+          {"enum", {"image", "base64", "file"}},
+          {"description",
+           "How the image comes back. image (default) returns an MCP image block. base64 returns the encoded "
+           "bytes as base64 text instead. file writes the image to save_path and returns that path."}}},
+        {"save_path",
+         {{"type", "string"},
+          {"description",
+           "Where to write the image when output is 'file'. Passed to the OS as-is, so a relative path resolves "
+           "against the server's working directory and the parent directory must already exist. The bytes are "
+           "written in the format selected by 'format'."}}},
     };
 
     Tool tool;
@@ -333,7 +375,9 @@ Tool make_screenshot_tool() {
     tool.description =
         "Capture the Windows desktop and return it as an image so you can see the screen. "
         "By default the whole virtual desktop (all monitors) is captured and downscaled so that it fits "
-        "within max_width/max_height. Call this before and after sending mouse or keyboard input.";
+        "within max_width/max_height, and the result comes back as an image block. Set output to 'base64' "
+        "for base64 text, or to 'file' with a save_path to write it to disk instead. "
+        "Call this before and after sending mouse or keyboard input.";
     tool.input_schema = {{"type", "object"}, {"properties", properties}};
     tool.handler = screenshot_handler;
     return tool;
