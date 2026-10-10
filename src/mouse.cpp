@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "mouse.h"
+#include "tools.h"
 #include "util.h"
 
 namespace {
@@ -263,26 +264,24 @@ int require_int(const nlohmann::json& args, const char* key) {
     return jargs::get_int(args, key, 0);
 }
 
-nlohmann::json mouse_handler(const nlohmann::json& args) {
-    const std::string action = util::to_lower(util::trim(jargs::get_string(args, "action", "")));
-    if (action.empty()) {
-        throw std::runtime_error("'action' is required");
-    }
+}  // namespace
 
+// 执行一步鼠标动作，返回该步的描述文本。action 是去掉 "mouse." 前缀后的名字。
+std::string run_mouse_step(const std::string& action, const nlohmann::json& args) {
     const std::string button = util::to_lower(jargs::get_string(args, "button", "left"));
 
     // 所有会移动光标的动作都走拟人轨迹：<0 按距离自动定时长，0 瞬移，>0 固定耗时
     const int duration = jargs::has(args, "duration_ms") ? jargs::get_int(args, "duration_ms", -1) : -1;
 
     if (action == "position") {
-        return text_content("cursor is at " + cursor_position_text());
+        return "cursor is at " + cursor_position_text();
     }
 
     if (action == "move") {
         const int x = require_int(args, "x");
         const int y = require_int(args, "y");
         move_humanized(x, y, duration);
-        return text_content("moved cursor to (" + std::to_string(x) + "," + std::to_string(y) + ")");
+        return "moved cursor to (" + std::to_string(x) + "," + std::to_string(y) + ")";
     }
 
     if (action == "move_relative") {
@@ -296,7 +295,7 @@ nlohmann::json mouse_handler(const nlohmann::json& args) {
             throw std::runtime_error("GetCursorPos failed: " + util::last_error_string(GetLastError()));
         }
         move_humanized(origin.x + dx, origin.y + dy, duration);
-        return text_content("moved cursor by (" + std::to_string(dx) + "," + std::to_string(dy) + ")");
+        return "moved cursor by (" + std::to_string(dx) + "," + std::to_string(dy) + ")";
     }
 
     if (action == "click" || action == "double_click") {
@@ -312,8 +311,7 @@ nlohmann::json mouse_handler(const nlohmann::json& args) {
             press_button(flags);
             release_button(flags);
         }
-        return text_content(button + (doubled ? " double_click" : " click") + " at " +
-                            cursor_position_text());
+        return button + (doubled ? " double_click" : " click") + " at " + cursor_position_text();
     }
 
     if (action == "down" || action == "up") {
@@ -326,8 +324,8 @@ nlohmann::json mouse_handler(const nlohmann::json& args) {
         } else {
             release_button(flags);
         }
-        return text_content(button + " button " + (action == "down" ? "pressed" : "released") + " at " +
-                            cursor_position_text());
+        return button + " button " + (action == "down" ? "pressed" : "released") + " at " +
+               cursor_position_text();
     }
 
     if (action == "drag") {
@@ -375,7 +373,7 @@ nlohmann::json mouse_handler(const nlohmann::json& args) {
         const POINT& last = stops.back();
         std::string summary = button + " drag to (" + std::to_string(last.x) + "," + std::to_string(last.y) + ")";
         if (stops.size() > 1) summary += " via " + std::to_string(stops.size() - 1) + " waypoint(s)";
-        return text_content(summary);
+        return summary;
     }
 
     if (action == "scroll") {
@@ -389,66 +387,9 @@ nlohmann::json mouse_handler(const nlohmann::json& args) {
         }
         scroll_wheel(dy * WHEEL_DELTA, false);
         scroll_wheel(dx * WHEEL_DELTA, true);
-        return text_content("scrolled by (" + std::to_string(dx) + "," + std::to_string(dy) + ") notch(es)");
+        return "scrolled by (" + std::to_string(dx) + "," + std::to_string(dy) + ") notch(es)";
     }
 
-    throw std::runtime_error("unknown mouse action: '" + action + "'");
+    throw std::runtime_error("unknown mouse action: 'mouse." + action + "'");
 }
 
-}  // namespace
-
-Tool make_mouse_tool() {
-    const nlohmann::json properties = {
-        {"action",
-         {{"type", "string"},
-          {"enum", {"move", "move_relative", "click", "double_click", "down", "up", "drag", "scroll", "position"}},
-          {"description",
-           "move: absolute move to x,y. move_relative: move by dx,dy. click: one press and release, optionally after "
-           "moving to x,y. double_click: two presses and releases in quick succession, so the system sees a real "
-           "double click. down / up: press or release a button and leave it in that state. drag: hold a button and "
-           "move to to_x,to_y, optionally passing through the 'waypoints' first. scroll: turn the wheel by dx,dy "
-           "notches (positive dy scrolls up). position: report "
-           "the cursor position."}}},
-        {"x", {{"type", "integer"}, {"description", "Absolute X in virtual-screen pixels."}}},
-        {"y", {{"type", "integer"}, {"description", "Absolute Y in virtual-screen pixels."}}},
-        {"dx", {{"type", "integer"}, {"description", "Relative X offset (move_relative) or wheel notches (scroll)."}}},
-        {"dy", {{"type", "integer"}, {"description", "Relative Y offset (move_relative) or wheel notches (scroll)."}}},
-        {"to_x", {{"type", "integer"}, {"description", "Drag target X. Optional when waypoints is given."}}},
-        {"to_y", {{"type", "integer"}, {"description", "Drag target Y. Optional when waypoints is given."}}},
-        {"waypoints",
-         {{"type", "array"},
-          {"description",
-           "drag only: a list of intermediate {x,y} points to pass through, in order, while the button stays down. "
-           "to_x,to_y is appended as the final stop when given."},
-          {"items",
-           {{"type", "object"},
-            {"properties",
-             {{"x", {{"type", "integer"}, {"description", "Absolute X in virtual-screen pixels."}}},
-              {"y", {{"type", "integer"}, {"description", "Absolute Y in virtual-screen pixels."}}}}},
-            {"required", {"x", "y"}}}}}},
-        {"button",
-         {{"type", "string"},
-          {"enum", {"left", "right", "middle", "x1", "x2"}},
-          {"description", "Mouse button, default left."}}},
-        {"duration_ms",
-         {{"type", "integer"},
-          {"description",
-           "Time spent moving the cursor, in milliseconds, for any action that repositions it (move, move_relative, "
-           "click, double_click, down, up, drag, scroll). Omit it to derive a human-like duration from the distance "
-           "(about 120 ms nearby, up to 650 ms across the screen); 0 jumps straight to the target. For a drag through "
-           "waypoints it is the total time for the whole path, split across segments by distance. The final position "
-           "is exact either way."}}},
-    };
-
-    Tool tool;
-    tool.name = "mouse";
-    tool.description =
-        "Control the Windows mouse cursor. Coordinates are absolute virtual-screen pixels with the origin at "
-        "the top-left, matching the image returned by 'screenshot'. Use 'position' to read the current cursor "
-        "location. Every action that repositions the cursor glides there along a human-like path by default; pass "
-        "duration_ms to control the time, or 0 to teleport. Input is injected with SendInput, so it cannot reach "
-        "windows that run at a higher integrity level than this process.";
-    tool.input_schema = {{"type", "object"}, {"properties", properties}, {"required", {"action"}}};
-    tool.handler = mouse_handler;
-    return tool;
-}

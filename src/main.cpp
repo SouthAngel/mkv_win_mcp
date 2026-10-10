@@ -24,7 +24,8 @@ const char* const kServerVersion = "1.0.0";
 
 const char* const kInstructions =
     "Controls a Windows desktop. Recommended loop: call 'screenshot' to see the current screen, "
-    "then act with 'mouse' / 'keyboard', then screenshot again to verify the result. "
+    "then act with 'mouse_key' (a sequence of mouse and keyboard actions), then screenshot again to verify "
+    "the result. "
     "All coordinates are absolute virtual-screen pixels with the origin at the top-left, matching the image "
     "returned by 'screenshot'. User interface privileges apply: input cannot be injected into a window that "
     "runs elevated while this process is not.";

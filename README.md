@@ -36,49 +36,71 @@ cmake --build build --config Release
 
 两种生成器的产物都落在 `build/bin/Release/mkv_win_mcp.exe`，静态链接，不依赖额外 DLL。
 
-## 三个工具
+## 两个工具
 
 ### screenshot — 看屏幕
 
-抓屏幕（默认整块虚拟桌面，也可指定显示器或某个矩形），等比缩放到 1568 像素以内，返回 PNG 或 JPEG 图片。
+抓屏幕（默认整块虚拟桌面，也可指定显示器或某个矩形），等比缩放到 1000 像素以内，默认以 base64 文本返回 PNG 或 JPEG。
 
 - `monitor`：显示器序号，`0` 是主屏，`-1`（默认）是全部显示器拼起来的桌面
 - `region`：只抓一块，给 `x` `y` `width` `height`
-- `max_width` / `max_height`：默认都是 1568
+- `max_width` / `max_height`：默认都是 1000
 - `format`：`png`（默认，无损）或 `jpeg`（小）；`quality` 默认 80
-- `output`：`image`（默认，返回图片块）/ `base64`（返回 base64 文本）/ `file`（存盘并返回路径）；选 `file` 时用 `save_path` 指定位置
+- `output`：`base64`（默认，返回 base64 文本）/ `file`（存盘并返回路径）；选 `file` 时用 `save_path` 指定位置
 
 `save_path` 原样交给系统，相对路径按服务进程的工作目录解析，父目录需要已存在；写出的格式跟随 `format`。
 
+返回内容里除了 base64 文本（或落盘路径），总会带上一行文字和一个 JSON 块，同时给出**原始尺寸**和**缩放后尺寸**，方便把图片上的像素坐标换算回屏幕坐标：
+
+```text
+captured 400x300 (original) at (0,0), returned 200x150 (scaled) png at 0.5x, 20908 bytes
+{"original":{"width":400,"height":300},"scaled":{"width":200,"height":150},"scale":0.5,"rect":{"x":0,"y":0,"width":400,"height":300},"format":"png","bytes":20908}
+```
+
+`output` 为 `file` 时，JSON 块里还会多一个 `path`。两种输出模式都会带上这些信息。
+
 限制尺寸是有原因的：4K 原图 base64 之后是好几 MB 的文本，很容易把上下文撑爆。
 
-### mouse — 动鼠标
+### mouse_key — 鼠标键盘动作序列
 
-`action` 可取 `move`、`move_relative`、`click`、`double_click`、`down`、`up`、`drag`、`scroll`、`position`。
+`steps` 是一个动作数组，按顺序执行。每步的 `action` 带设备前缀，鼠标动作用 `mouse.`，键盘用 `key.`：
 
-坐标是虚拟屏幕的绝对像素，和截图里的位置一一对应。`click` 可以顺便带上 `x` `y`，`drag` 用 `to_x` `to_y` 指定终点，`scroll` 的 `dy` 为正表示向上滚。按钮默认 `left`，另有 `right` `middle` `x1` `x2`。
+- 鼠标：`mouse.move`、`mouse.move_relative`、`mouse.click`、`mouse.double_click`、`mouse.down`、`mouse.up`、`mouse.drag`、`mouse.scroll`、`mouse.position`
+- 键盘：`key.type`、`key.press`、`key.hotkey`、`key.down`、`key.up`
+
+每步可选 `delay_ms`，执行完这步后停顿再走下一步。
+
+坐标是虚拟屏幕的绝对像素，和截图里的位置一一对应。按钮默认 `left`，另有 `right` `middle` `x1` `x2`。`mouse.click` 可以顺便带上 `x` `y`，`mouse.drag` 用 `to_x` `to_y` 指定终点，`mouse.scroll` 的 `dy` 为正表示向上滚。
 
 拖拽还支持拐弯：给一串 `waypoints`（`[{"x":..,"y":..}, ...]`），按下后依次经过这些点，最后在 `to_x` `to_y` 松手（不给 `to_x` `to_y` 就在最后一个途经点松手）。给 `duration_ms` 时它表示整段路径的总时长，按各段距离分配。
 
-`move` 和 `drag` 默认按距离自动定时长，沿最小急动度曲线带一点弧度和手抖地滑过去，节奏接近人手而不是匀速直线；落点始终精确。实际上**所有会移动光标的动作都是这样**——`click`、`double_click`、`down`、`up`、`scroll` 带上 `x` `y` 时，以及 `move_relative`，都会先滑过去再动作。想让光标瞬间跳过去就显式传 `duration_ms: 0`，想固定耗时就直接传毫秒数。
+`mouse.move` 和 `mouse.drag` 默认按距离自动定时长，沿最小急动度曲线带一点弧度和手抖地滑过去，节奏接近人手而不是匀速直线；落点始终精确。实际上**所有会移动光标的动作都是这样**——`mouse.click`、`mouse.double_click`、`mouse.down`、`mouse.up`、`mouse.scroll` 带上 `x` `y` 时，以及 `mouse.move_relative`，都会先滑过去再动作。想让光标瞬间跳过去就显式传 `duration_ms: 0`，想固定耗时就直接传毫秒数。
 
 ```json
-{"action": "click", "x": 640, "y": 400}
+{"steps": [
+  {"action": "mouse.move", "x": 640, "y": 400},
+  {"action": "mouse.click"},
+  {"action": "key.type", "text": "hello world"},
+  {"action": "key.press", "key": "enter"}
+]}
 ```
 
-### keyboard — 敲键盘
-
-`action` 可取 `type`、`key`、`hotkey`、`key_down`、`key_up`。
+合成一个工具的价值在于跨设备动作可以精确交错。比如按住 Shift 连点两处再松开，按住和松开之间的鼠标动作由同一次调用保证顺序：
 
 ```json
-{"action": "type", "text": "你好 world"}
-{"action": "hotkey", "keys": ["ctrl", "shift", "s"]}
-{"action": "key", "key": "enter"}
+{"steps": [
+  {"action": "key.down", "key": "shift"},
+  {"action": "mouse.click", "x": 300, "y": 220},
+  {"action": "mouse.click", "x": 520, "y": 340},
+  {"action": "key.up", "key": "shift"}
+]}
 ```
 
-`type` 按 Unicode 注入，跟当前键盘布局无关，中文可以正常输入。键名支持 `a`–`z`、`0`–`9`、`f1`–`f24`，以及 `enter` `esc` `tab` `space` `up` `delete` `ctrl` `shift` `alt` `win` 等。
+`key.type` 按 Unicode 注入，跟当前键盘布局无关，中文可以正常输入。键名支持 `a`–`z`、`0`–`9`、`f1`–`f24`，以及 `enter` `esc` `tab` `space` `up` `delete` `ctrl` `shift` `alt` `win` 等。
 
-三个工具都还有几个次要参数（重复次数、平滑移动耗时、点击间隔等），在客户端里执行一次 `tools/list` 就能看到完整定义。
+某一步失败会立刻中止，错误信息里带上出错步的序号和动作名；如果这次调用按下了还没松开的按钮或键，会先松开再报错，不会把它们留在按下状态。
+
+两个工具都还有几个次要参数（重复次数、平滑移动耗时、点击间隔等），在客户端里执行一次 `tools/list` 就能看到完整定义。
 
 ## 手动配置
 

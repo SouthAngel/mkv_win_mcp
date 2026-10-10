@@ -1,14 +1,12 @@
 #include "tools.h"
 
-#include "keyboard.h"
-#include "mouse.h"
+#include "input.h"
 #include "screenshot.h"
 
 const std::vector<Tool>& all_tools() {
     static const std::vector<Tool> tools = {
         make_screenshot_tool(),
-        make_mouse_tool(),
-        make_keyboard_tool(),
+        make_mouse_key_tool(),
     };
     return tools;
 }

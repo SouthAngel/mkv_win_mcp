@@ -17,7 +17,7 @@
 
 namespace {
 
-const int kDefaultMaxSize = 1568;
+const int kDefaultMaxSize = 1000;
 const int kDefaultJpegQuality = 80;
 
 const wchar_t* const kMimePng = L"image/png";
@@ -241,9 +241,9 @@ nlohmann::json screenshot_handler(const nlohmann::json& args) {
     }
 
     // 先校验再抓屏，避免抓完一轮才因为参数写错失败
-    const std::string output_mode = util::to_lower(util::trim(jargs::get_string(args, "output", "image")));
-    if (output_mode != "image" && output_mode != "base64" && output_mode != "file") {
-        throw std::runtime_error("output must be 'image', 'base64' or 'file'");
+    const std::string output_mode = util::to_lower(util::trim(jargs::get_string(args, "output", "base64")));
+    if (output_mode != "base64" && output_mode != "file") {
+        throw std::runtime_error("output must be 'base64' or 'file'");
     }
     const std::string save_path = jargs::get_string(args, "save_path", "");
     if (output_mode == "file" && save_path.empty()) {
@@ -296,10 +296,29 @@ nlohmann::json screenshot_handler(const nlohmann::json& args) {
     const std::wstring mime = use_jpeg ? kMimeJpeg : kMimePng;
     const std::vector<unsigned char> bytes = encode_image(*output, mime, quality);
 
+    // 缩放比用实际输出宽度算，和 lround 之后的像素尺寸保持自洽；
+    // 模型拿图片坐标反推屏幕坐标时，靠的是 original / scaled 这两组尺寸。
+    const double actual_scale =
+        (source_width > 0) ? static_cast<double>(output_width) / static_cast<double>(source_width) : 1.0;
+    const double reported_scale = std::lround(actual_scale * 10000.0) / 10000.0;
+
+    std::ostringstream scale_text;
+    scale_text << reported_scale;
+
     std::ostringstream summary;
-    summary << "captured " << source_width << "x" << source_height << " at (" << rect.left << "," << rect.top
-            << "), returned " << output_width << "x" << output_height << " "
-            << (use_jpeg ? "jpeg" : "png") << ", " << bytes.size() << " bytes";
+    summary << "captured " << source_width << "x" << source_height << " (original) at (" << rect.left << ","
+            << rect.top << "), returned " << output_width << "x" << output_height << " (scaled) "
+            << (use_jpeg ? "jpeg" : "png") << " at " << scale_text.str() << "x, " << bytes.size() << " bytes";
+
+    nlohmann::json dimensions = {
+        {"original", {{"width", source_width}, {"height", source_height}}},
+        {"scaled", {{"width", output_width}, {"height", output_height}}},
+        {"scale", reported_scale},
+        {"rect",
+         {{"x", rect.left}, {"y", rect.top}, {"width", source_width}, {"height", source_height}}},
+        {"format", use_jpeg ? "jpeg" : "png"},
+        {"bytes", bytes.size()},
+    };
 
     if (output_mode == "file") {
         const std::wstring wide_path = util::to_wide(save_path);
@@ -313,18 +332,17 @@ nlohmann::json screenshot_handler(const nlohmann::json& args) {
             throw std::runtime_error("failed to write '" + save_path + "'");
         }
         summary << ", written to " << save_path;
-        return nlohmann::json::array({{{"type", "text"}, {"text", summary.str()}}});
+        dimensions["path"] = save_path;
+    }
+
+    const nlohmann::json size_block = {{"type", "text"}, {"text", dimensions.dump()}};
+    const nlohmann::json summary_block = {{"type", "text"}, {"text", summary.str()}};
+    if (output_mode == "file") {
+        return nlohmann::json::array({summary_block, size_block});
     }
 
     const std::string encoded = util::base64_encode(bytes.data(), bytes.size());
-    if (output_mode == "base64") {
-        return nlohmann::json::array(
-            {{{"type", "text"}, {"text", summary.str()}}, {{"type", "text"}, {"text", encoded}}});
-    }
-
-    return nlohmann::json::array(
-        {{{"type", "text"}, {"text", summary.str()}},
-         {{"type", "image"}, {"data", encoded}, {"mimeType", use_jpeg ? "image/jpeg" : "image/png"}}});
+    return nlohmann::json::array({summary_block, size_block, {{"type", "text"}, {"text", encoded}}});
 }
 
 }  // namespace
@@ -348,8 +366,8 @@ Tool make_screenshot_tool() {
            "Monitor index, where 0 is the primary display and the remaining monitors follow in system order. "
            "Omit it (or pass -1) to capture the whole virtual desktop."}}},
         {"region", region},
-        {"max_width", {{"type", "integer"}, {"description", "Maximum width of the returned image. Default 1568."}}},
-        {"max_height", {{"type", "integer"}, {"description", "Maximum height of the returned image. Default 1568."}}},
+        {"max_width", {{"type", "integer"}, {"description", "Maximum width of the returned image. Default 1000."}}},
+        {"max_height", {{"type", "integer"}, {"description", "Maximum height of the returned image. Default 1000."}}},
         {"format",
          {{"type", "string"},
           {"enum", {"png", "jpeg"}},
@@ -358,10 +376,10 @@ Tool make_screenshot_tool() {
          {{"type", "integer"}, {"description", "JPEG quality within 1..100. Default 80, ignored for png."}}},
         {"output",
          {{"type", "string"},
-          {"enum", {"image", "base64", "file"}},
+          {"enum", {"base64", "file"}},
           {"description",
-           "How the image comes back. image (default) returns an MCP image block. base64 returns the encoded "
-           "bytes as base64 text instead. file writes the image to save_path and returns that path."}}},
+           "How the image comes back. base64 (default) returns the encoded bytes as base64 text. file writes the "
+           "image to save_path and returns that path."}}},
         {"save_path",
          {{"type", "string"},
           {"description",
@@ -373,10 +391,12 @@ Tool make_screenshot_tool() {
     Tool tool;
     tool.name = "screenshot";
     tool.description =
-        "Capture the Windows desktop and return it as an image so you can see the screen. "
+        "Capture the Windows desktop and return it so you can see the screen. "
         "By default the whole virtual desktop (all monitors) is captured and downscaled so that it fits "
-        "within max_width/max_height, and the result comes back as an image block. Set output to 'base64' "
-        "for base64 text, or to 'file' with a save_path to write it to disk instead. "
+        "within max_width/max_height, and the encoded bytes come back as base64 text. "
+        "Set output to 'file' with a save_path to write it to disk instead. "
+        "The reply always reports the captured (original) size and the returned (scaled) size, both as text and "
+        "as a machine-readable JSON block, so image pixels can be mapped back to screen pixels. "
         "Call this before and after sending mouse or keyboard input.";
     tool.input_schema = {{"type", "object"}, {"properties", properties}};
     tool.handler = screenshot_handler;

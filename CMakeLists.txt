@@ -22,6 +22,7 @@ add_executable(mkv_win_mcp
     src/util.cpp
     src/tools.cpp
     src/screenshot.cpp
+    src/input.cpp
     src/mouse.cpp
     src/keyboard.cpp
 )

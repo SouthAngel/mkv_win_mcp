@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "keyboard.h"
+#include "tools.h"
 #include "util.h"
 
 namespace {
@@ -252,24 +253,22 @@ void send_hotkey(const std::vector<std::string>& names) {
     flush_inputs(inputs);
 }
 
-nlohmann::json keyboard_handler(const nlohmann::json& args) {
-    const std::string action = util::to_lower(util::trim(jargs::get_string(args, "action", "")));
-    if (action.empty()) {
-        throw std::runtime_error("'action' is required");
-    }
+}  // namespace
 
+// 执行一步键盘动作，返回该步的描述文本。action 是去掉 "key." 前缀后的名字。
+std::string run_keyboard_step(const std::string& action, const nlohmann::json& args) {
     int interval_ms = jargs::get_int(args, "interval_ms", 0);
     if (interval_ms < 0) interval_ms = 0;
 
     if (action == "type") {
         const std::string text = jargs::get_string(args, "text", "");
         type_text(text, interval_ms);
-        return text_content("typed " + std::to_string(util::to_wide(text).size()) + " character(s)");
+        return "typed " + std::to_string(util::to_wide(text).size()) + " character(s)";
     }
 
-    if (action == "key") {
+    if (action == "press") {
         const std::string name = jargs::get_string(args, "key", "");
-        if (name.empty()) throw std::runtime_error("'key' is required for action 'key'");
+        if (name.empty()) throw std::runtime_error("'key' is required for action 'press'");
         std::vector<WORD> extra_modifiers;
         const WORD vk = resolve_key(name, extra_modifiers);
 
@@ -290,7 +289,7 @@ nlohmann::json keyboard_handler(const nlohmann::json& args) {
             }
             if (i + 1 < repeat) sleep_ms(interval_ms > 0 ? interval_ms : 20);
         }
-        return text_content("pressed '" + name + "' x" + std::to_string(repeat));
+        return "pressed '" + name + "' x" + std::to_string(repeat);
     }
 
     if (action == "hotkey") {
@@ -310,17 +309,17 @@ nlohmann::json keyboard_handler(const nlohmann::json& args) {
             if (i > 0) joined += "+";
             joined += names[i];
         }
-        return text_content("sent hotkey " + joined);
+        return "sent hotkey " + joined;
     }
 
-    if (action == "key_down" || action == "key_up") {
+    if (action == "down" || action == "up") {
         const std::string name = jargs::get_string(args, "key", "");
         if (name.empty()) throw std::runtime_error(std::string("'key' is required for action '") + action + "'");
         std::vector<WORD> extra_modifiers;
         const WORD vk = resolve_key(name, extra_modifiers);
 
         std::vector<INPUT> inputs;
-        const bool key_up = (action == "key_up");
+        const bool key_up = (action == "up");
         if (!key_up) {
             for (const WORD modifier : extra_modifiers) append_key_event(inputs, modifier, false);
         }
@@ -331,47 +330,9 @@ nlohmann::json keyboard_handler(const nlohmann::json& args) {
             }
         }
         flush_inputs(inputs);
-        return text_content(std::string("key '") + name + "' " + (key_up ? "released" : "pressed"));
+        return std::string("key '") + name + "' " + (key_up ? "released" : "pressed");
     }
 
-    throw std::runtime_error("unknown keyboard action: '" + action + "'");
+    throw std::runtime_error("unknown keyboard action: 'key." + action + "'");
 }
 
-}  // namespace
-
-Tool make_keyboard_tool() {
-    const nlohmann::json properties = {
-        {"action",
-         {{"type", "string"},
-          {"enum", {"type", "key", "hotkey", "key_down", "key_up"}},
-          {"description",
-           "type: send the string in 'text'. key: press and release 'key'. hotkey: press 'keys' together. "
-           "key_down / key_up: hold or release 'key'."}}},
-        {"text", {{"type", "string"}, {"description", "Text to type, for action 'type'. Supports Unicode."}}},
-        {"key",
-         {{"type", "string"},
-          {"description",
-           "Key name for key / key_down / key_up. Examples: a, 7, f5, enter, esc, tab, space, backspace, delete, "
-           "home, end, pageup, pagedown, up, down, left, right, ctrl, shift, alt, win."}}},
-        {"keys",
-         {{"type", "array"},
-          {"items", {{"type", "string"}}},
-          {"description", "Key names pressed together, for action 'hotkey'. Example: [\"ctrl\",\"c\"]."}}},
-        {"repeat", {{"type", "integer"}, {"description", "How many times to press the key. Default 1."}}},
-        {"interval_ms",
-         {{"type", "integer"},
-          {"description", "Delay between repeated keys or typed characters, in milliseconds. Default 0."}}},
-    };
-
-    Tool tool;
-    tool.name = "keyboard";
-    tool.description =
-        "Control the Windows keyboard. 'type' sends arbitrary Unicode text using scancode-based input, so it "
-        "works regardless of the active keyboard layout. 'key' presses a single named key, 'hotkey' presses a "
-        "combination such as [\"ctrl\",\"shift\",\"s\"], and 'key_down' / 'key_up' hold or release a key. "
-        "Input is injected with SendInput, so it cannot reach windows that run at a higher integrity level than "
-        "this process.";
-    tool.input_schema = {{"type", "object"}, {"properties", properties}, {"required", {"action"}}};
-    tool.handler = keyboard_handler;
-    return tool;
-}
